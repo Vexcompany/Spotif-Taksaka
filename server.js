@@ -6,144 +6,147 @@ const app = express();
 app.use(cors());
 app.use(express.json({limit: '50mb'}));
 
-let cachedToken = null;
-let tokenExpiry = 0;
+const PORT = process.env.PORT || 3000;
 
-async function getToken() {
-  const now = Date.now();
-  if (cachedToken && now < tokenExpiry) return cachedToken;
-  
-  const r = await axios.post('https://api.spotidownloader.com/session', {}, {
-    headers: {
-      'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36',
-      'content-type': 'application/json',
-      'origin': 'https://spotidownloader.com',
-      'referer': 'https://spotidownloader.com/'
+// Config SoundCloud API (dari soundCloud.js Anda)
+const SCDL = {
+    config: {
+        baseUrl: "https://sc.snapfirecdn.com",
+        headers: {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
     },
-    timeout: 10000
-  });
-  
-  if (r.data?.token) {
-    cachedToken = r.data.token;
-    tokenExpiry = now + (4 * 60 * 1000);
-    return cachedToken;
-  }
-  throw new Error('Token tidak ditemukan');
+
+    download: async (url) => {
+        try {
+            if (!url) throw new Error("URL SoundCloud diperlukan");
+
+            // Step 1: Get info lagu
+            const { data: info } = await axios.post(
+                `${SCDL.config.baseUrl}/soundcloud`, 
+                { target: url, gsc: "x" }, 
+                { headers: SCDL.config.headers, timeout: 15000 }
+            );
+
+            if (!info.sound || !info.sound.progressive_url) {
+                throw new Error("Gagal mendapatkan info lagu");
+            }
+
+            // Step 2: Get direct MP3 link
+            const dlUrl = `${SCDL.config.baseUrl}/soundcloud-get-dl?target=${encodeURIComponent(info.sound.progressive_url)}`;
+            const { data: dl } = await axios.get(dlUrl, { 
+                headers: SCDL.config.headers,
+                timeout: 15000 
+            });
+
+            return {
+                title: info.sound.title,
+                artist: info.metadata.username,
+                thumb: info.metadata.artwork_url || info.metadata.artwork_url_template?.replace('{width}x{height}', '300x300'),
+                duration: info.sound.duration ? Math.floor(info.sound.duration / 1000) : 0,
+                download_url: dl.url
+            };
+
+        } catch (err) {
+            throw new Error(err.message);
+        }
+    }
+};
+
+// Search SoundCloud (dari soundCloudSearchDL.js)
+async function searchSoundCloud(query) {
+    try {
+        const { data } = await axios.get(
+            `https://host.optikl.ink/soundcloud/search?query=${encodeURIComponent(query)}`,
+            { timeout: 15000 }
+        );
+        return data;
+    } catch (err) {
+        throw new Error("Gagal search: " + err.message);
+    }
 }
 
-async function searchSpotify(query, bearer) {
-  const r = await axios.post('https://api.spotidownloader.com/search', 
-    { query },
-    {
-      headers: {
-        'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36',
-        'content-type': 'application/json',
-        'authorization': `Bearer ${bearer}`,
-        'origin': 'https://spotidownloader.com',
-        'referer': 'https://spotidownloader.com/'
-      },
-      timeout: 15000
-    }
-  );
-  return r.data;
-}
+// Endpoint: Search + Download
+app.get('/api/soundcloud-play', async (req, res) => {
+    try {
+        const q = req.query.q || req.query.query;
+        
+        if (!q) {
+            return res.status(400).json({ 
+                status: false, 
+                message: 'Parameter q/query diperlukan' 
+            });
+        }
 
-async function getDownloadLink(id, bearer) {
-  const r = await axios.post('https://api.spotidownloader.com/download',
-    { id },
-    {
-      headers: {
-        'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36',
-        'content-type': 'application/json',
-        'authorization': `Bearer ${bearer}`,
-        'origin': 'https://spotidownloader.com',
-        'referer': 'https://spotidownloader.com/'
-      },
-      timeout: 15000
-    }
-  );
-  return r.data;
-}
+        // 1. Search dulu
+        const searchResults = await searchSoundCloud(q);
+        
+        if (!searchResults || searchResults.length === 0) {
+            return res.status(404).json({ 
+                status: false, 
+                message: 'Lagu tidak ditemukan' 
+            });
+        }
 
-async function downloadAudio(url, bearer) {
-  const r = await axios.get(url, {
-    responseType: 'arraybuffer',
-    headers: {
-      'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36',
-      'authorization': `Bearer ${bearer}`,
-      'origin': 'https://spotidownloader.com',
-      'referer': 'https://spotifydown.com/'
-    },
-    timeout: 60000,
-    maxContentLength: 100 * 1024 * 1024
-  });
-  return Buffer.from(r.data);
-}
+        // Ambil hasil pertama
+        const track = searchResults[0];
+        
+        // 2. Download lagu
+        const downloadInfo = await SCDL.download(track.url);
 
-app.get('/api/spotify-play', async (req, res) => {
-  try {
-    const { q } = req.query;
-    if (!q) return res.status(400).json({ status: false, message: 'Query diperlukan' });
-    
-    const token = await getToken();
-    let trackId = null;
-    let trackInfo = null;
-    
-    const spotifyUrlMatch = q.match(/spotify\.com\/track\/([a-zA-Z0-9]{22})/i);
-    if (spotifyUrlMatch) {
-      trackId = spotifyUrlMatch[1];
-    } else if (/^[a-zA-Z0-9]{22}$/.test(q)) {
-      trackId = q;
+        // Format response sama seperti FAA API (biar frontend tidak perlu banyak ubah)
+        res.json({
+            status: true,
+            info: {
+                title: downloadInfo.title,
+                artist: downloadInfo.artist,
+                album: '', // SoundCloud tidak ada album
+                duration: formatDuration(downloadInfo.duration),
+                thumbnail: downloadInfo.thumb,
+                soundcloud_url: track.url
+            },
+            download: {
+                url: downloadInfo.download_url, // Direct MP3 link
+                format: 'mp3',
+                size: 0 // Tidak diketahui dari API
+            },
+            source: 'soundcloud'
+        });
+
+    } catch (error) {
+        console.error('Error:', error.message);
+        res.status(500).json({ 
+            status: false, 
+            message: error.message 
+        });
     }
-    
-    if (!trackId) {
-      const searchResults = await searchSpotify(q, token);
-      if (!searchResults?.tracks?.length) {
-        return res.status(404).json({ status: false, message: 'Lagu tidak ditemukan' });
-      }
-      trackInfo = searchResults.tracks[0];
-      trackId = trackInfo.id;
-    }
-    
-    const downloadInfo = await getDownloadLink(trackId, token);
-    if (!downloadInfo?.link) {
-      return res.status(500).json({ status: false, message: 'Gagal mendapatkan link download' });
-    }
-    
-    const audioBuffer = await downloadAudio(downloadInfo.link, token);
-    
-    res.json({
-      status: true,
-      info: {
-        title: trackInfo?.title || downloadInfo.title,
-        artist: trackInfo?.artist || downloadInfo.artist,
-        album: trackInfo?.album || downloadInfo.album || '',
-        duration: trackInfo?.duration || downloadInfo.duration || '0:00',
-        thumbnail: trackInfo?.thumbnail || downloadInfo.thumbnail || '',
-        spotify_url: `https://open.spotify.com/track/${trackId}`,
-        release_date: trackInfo?.release_date || new Date().getFullYear().toString()
-      },
-      download: {
-        url: `data:audio/mpeg;base64,${audioBuffer.toString('base64')}`,
-        format: 'mp3',
-        size: audioBuffer.length
-      }
-    });
-    
-  } catch (error) {
-    res.status(500).json({ status: false, message: error.message });
-  }
 });
 
+// Helper: Format detik ke mm:ss
+function formatDuration(seconds) {
+    if (!seconds) return '0:00';
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+}
+
+// Health check
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+    res.json({ 
+        status: 'ok', 
+        service: 'soundcloud-downloader',
+        timestamp: new Date().toISOString() 
+    });
 });
 
+// Export untuk Vercel
 module.exports = app;
 
+// Local development
 if (require.main === module) {
-  const PORT = process.env.PORT || 3000;
-  app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-  });
+    app.listen(PORT, () => {
+        console.log(`SoundCloud Proxy running on port ${PORT}`);
+    });
 }
