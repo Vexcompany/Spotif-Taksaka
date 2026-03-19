@@ -6,9 +6,6 @@ const app = express();
 app.use(cors());
 app.use(express.json({limit: '50mb'}));
 
-const PORT = process.env.PORT || 3000;
-
-// Cache token
 let cachedToken = null;
 let tokenExpiry = 0;
 
@@ -16,26 +13,22 @@ async function getToken() {
   const now = Date.now();
   if (cachedToken && now < tokenExpiry) return cachedToken;
   
-  try {
-    const r = await axios.post('https://api.spotidownloader.com/session', {}, {
-      headers: {
-        'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36',
-        'content-type': 'application/json',
-        'origin': 'https://spotidownloader.com',
-        'referer': 'https://spotidownloader.com/'
-      },
-      timeout: 10000
-    });
-    
-    if (r.data?.token) {
-      cachedToken = r.data.token;
-      tokenExpiry = now + (4 * 60 * 1000);
-      return cachedToken;
-    }
-    throw new Error('Token tidak ditemukan');
-  } catch (error) {
-    throw new Error('Gagal mendapatkan token: ' + error.message);
+  const r = await axios.post('https://api.spotidownloader.com/session', {}, {
+    headers: {
+      'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36',
+      'content-type': 'application/json',
+      'origin': 'https://spotidownloader.com',
+      'referer': 'https://spotidownloader.com/'
+    },
+    timeout: 10000
+  });
+  
+  if (r.data?.token) {
+    cachedToken = r.data.token;
+    tokenExpiry = now + (4 * 60 * 1000);
+    return cachedToken;
   }
+  throw new Error('Token tidak ditemukan');
 }
 
 async function searchSpotify(query, bearer) {
@@ -87,7 +80,6 @@ async function downloadAudio(url, bearer) {
   return Buffer.from(r.data);
 }
 
-// Endpoint utama
 app.get('/api/spotify-play', async (req, res) => {
   try {
     const { q } = req.query;
@@ -97,7 +89,6 @@ app.get('/api/spotify-play', async (req, res) => {
     let trackId = null;
     let trackInfo = null;
     
-    // Parse URL atau ID Spotify
     const spotifyUrlMatch = q.match(/spotify\.com\/track\/([a-zA-Z0-9]{22})/i);
     if (spotifyUrlMatch) {
       trackId = spotifyUrlMatch[1];
@@ -105,7 +96,6 @@ app.get('/api/spotify-play', async (req, res) => {
       trackId = q;
     }
     
-    // Search jika bukan ID langsung
     if (!trackId) {
       const searchResults = await searchSpotify(q, token);
       if (!searchResults?.tracks?.length) {
@@ -115,16 +105,13 @@ app.get('/api/spotify-play', async (req, res) => {
       trackId = trackInfo.id;
     }
     
-    // Get download link
     const downloadInfo = await getDownloadLink(trackId, token);
     if (!downloadInfo?.link) {
       return res.status(500).json({ status: false, message: 'Gagal mendapatkan link download' });
     }
     
-    // Download audio
     const audioBuffer = await downloadAudio(downloadInfo.link, token);
     
-    // Response format sama seperti FAA API
     res.json({
       status: true,
       info: {
@@ -139,14 +126,11 @@ app.get('/api/spotify-play', async (req, res) => {
       download: {
         url: `data:audio/mpeg;base64,${audioBuffer.toString('base64')}`,
         format: 'mp3',
-        size: audioBuffer.length,
-        quality: '128kbps'
-      },
-      source: 'spotidownloader'
+        size: audioBuffer.length
+      }
     });
     
   } catch (error) {
-    console.error('Error:', error.message);
     res.status(500).json({ status: false, message: error.message });
   }
 });
@@ -155,6 +139,11 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-app.listen(PORT, () => {
-  console.log(`Spotify Proxy running on port ${PORT}`);
-});
+module.exports = app;
+
+if (require.main === module) {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+}
