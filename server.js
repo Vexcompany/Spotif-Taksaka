@@ -14,7 +14,6 @@ const PORT = process.env.PORT || 3000;
 const SPOTIFY_CLIENT_ID     = "f235a7370f4442f7a062738fdd310dfa";
 const SPOTIFY_CLIENT_SECRET = "0cf4d6c4e1344f45bdd8b3d4a5f3cad5";
 
-// ── Token cache ───────────────────────────────────────────────
 let _spotifyToken    = null;
 let _spotifyTokenExp = 0;
 
@@ -39,7 +38,6 @@ async function getSpotifyToken() {
   return _spotifyToken;
 }
 
-// ── Search metadata dari Spotify ──────────────────────────────
 async function searchSpotify(query) {
   const token = await getSpotifyToken();
   const res   = await axios.get('https://api.spotify.com/v1/search', {
@@ -53,18 +51,31 @@ async function searchSpotify(query) {
   return items[0];
 }
 
-// ── FAA Downloader ────────────────────────────────────────────
-//  Endpoint: GET https://api-faa.my.id/faa/spotify-play?query=<judul artis>
+// ════════════════════════════════════════════════════════════
+//  FAA DOWNLOADER — dengan browser headers agar tidak 403
+// ════════════════════════════════════════════════════════════
+const FAA_HEADERS = {
+  'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Accept':          'application/json, text/plain, */*',
+  'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
+  'Origin':          'https://api-faa.my.id',
+  'Referer':         'https://api-faa.my.id/',
+};
+
 async function faaDownload(query) {
   const res = await axios.get('https://api-faa.my.id/faa/spotify-play', {
     params:  { query },
+    headers: FAA_HEADERS,
     timeout: 25000,
   });
 
   const d = res.data;
+
+  // Log response untuk debugging (hapus setelah konfirmasi berjalan)
+  console.log('[FAA response]', JSON.stringify(d).substring(0, 300));
+
   if (!d?.status) throw new Error(d?.message || 'FAA API: status false');
 
-  // Support berbagai shape response
   const url =
     d?.download?.url       ||
     d?.result?.download    ||
@@ -75,14 +86,12 @@ async function faaDownload(query) {
     d?.url                 ||
     d?.data?.url;
 
-  if (!url) throw new Error('FAA API: download URL tidak ditemukan dalam response');
+  if (!url) throw new Error('FAA API: download URL tidak ditemukan. Response: ' + JSON.stringify(d).substring(0, 200));
   return url;
 }
 
 // ════════════════════════════════════════════════════════════
 //  ENDPOINT UTAMA
-//  GET /api/soundcloud-play?q=<query>
-//  Nama endpoint dipertahankan agar index.html tidak perlu diubah
 // ════════════════════════════════════════════════════════════
 app.get('/api/soundcloud-play', async (req, res) => {
   try {
@@ -91,7 +100,7 @@ app.get('/api/soundcloud-play', async (req, res) => {
       return res.status(400).json({ status: false, message: 'Parameter q diperlukan' });
     }
 
-    // 1. Ambil metadata dari Spotify
+    // 1. Metadata dari Spotify
     const track = await searchSpotify(q);
 
     const title    = track.name;
@@ -102,10 +111,9 @@ app.get('/api/soundcloud-play', async (req, res) => {
     const duration = formatDuration(Math.floor((track.duration_ms || 0) / 1000));
     const year     = track.album?.release_date?.slice(0, 4) || '–';
 
-    // 2. Download audio via FAA
+    // 2. Audio via FAA
     const audioUrl = await faaDownload(`${title} ${artist}`);
 
-    // 3. Response — shape sama persis seperti sebelumnya
     return res.json({
       status: true,
       info: {
@@ -126,21 +134,39 @@ app.get('/api/soundcloud-play', async (req, res) => {
 
   } catch (err) {
     console.error('[/api/soundcloud-play]', err.message);
-    return res.status(500).json({ status: false, message: err.message });
+    // Kirim pesan error yang lebih detail ke frontend untuk debugging
+    return res.status(500).json({
+      status:  false,
+      message: err.message,
+      detail:  err.response?.data || null,
+    });
   }
 });
 
-// ── Health check ──────────────────────────────────────────────
-app.get('/api/health', (_req, res) => {
-  res.json({
-    status:    'ok',
-    service:   'pagaska-music-backend',
-    source:    'spotify + faa (api-faa.my.id)',
-    timestamp: new Date().toISOString(),
-  });
+// ── Debug endpoint: cek FAA API langsung ──────────────────────
+app.get('/api/test-faa', async (req, res) => {
+  const q = (req.query.q || 'shape of you ed sheeran').trim();
+  try {
+    const r = await axios.get('https://api-faa.my.id/faa/spotify-play', {
+      params:  { query: q },
+      headers: FAA_HEADERS,
+      timeout: 25000,
+    });
+    res.json({ status: true, faaResponse: r.data, faaStatus: r.status });
+  } catch (err) {
+    res.json({
+      status:      false,
+      message:     err.message,
+      httpStatus:  err.response?.status,
+      faaResponse: err.response?.data,
+    });
+  }
 });
 
-// ── Helper: format detik → mm:ss ─────────────────────────────
+app.get('/api/health', (_req, res) => {
+  res.json({ status: 'ok', service: 'pagaska-music-backend', source: 'spotify+faa', timestamp: new Date().toISOString() });
+});
+
 function formatDuration(totalSeconds) {
   if (!totalSeconds || isNaN(totalSeconds)) return '0:00';
   const m = Math.floor(totalSeconds / 60);
@@ -148,12 +174,10 @@ function formatDuration(totalSeconds) {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
-// ── Export untuk Vercel ───────────────────────────────────────
 module.exports = app;
 
 if (require.main === module) {
   app.listen(PORT, () => {
     console.log(`✅ Pagaska Music Backend: port ${PORT}`);
-    console.log(`   Source: Spotify metadata + FAA (api-faa.my.id)`);
   });
 }
