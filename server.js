@@ -4,149 +4,201 @@ const axios = require('axios');
 
 const app = express();
 app.use(cors());
-app.use(express.json({limit: '50mb'}));
+app.use(express.json({ limit: '50mb' }));
 
 const PORT = process.env.PORT || 3000;
 
-// Config SoundCloud API (dari soundCloud.js Anda)
-const SCDL = {
-    config: {
-        baseUrl: "https://sc.snapfirecdn.com",
-        headers: {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
-    },
+// ════════════════════════════════════════════════════════════
+//  SPOTIFY CREDENTIALS
+//  Sama persis seperti yang dipakai bot Telegram pagaska.js
+// ════════════════════════════════════════════════════════════
+const SPOTIFY_CLIENT_ID     = "f235a7370f4442f7a062738fdd310dfa";
+const SPOTIFY_CLIENT_SECRET = "0cf4d6c4e1344f45bdd8b3d4a5f3cad5";
 
-    download: async (url) => {
-        try {
-            if (!url) throw new Error("URL SoundCloud diperlukan");
+// ── Token cache (supaya tidak hit /api/token setiap request) ──
+let _spotifyToken    = null;
+let _spotifyTokenExp = 0;
 
-            // Step 1: Get info lagu
-            const { data: info } = await axios.post(
-                `${SCDL.config.baseUrl}/soundcloud`, 
-                { target: url, gsc: "x" }, 
-                { headers: SCDL.config.headers, timeout: 15000 }
-            );
+async function getSpotifyToken() {
+  if (_spotifyToken && Date.now() < _spotifyTokenExp) return _spotifyToken;
 
-            if (!info.sound || !info.sound.progressive_url) {
-                throw new Error("Gagal mendapatkan info lagu");
-            }
-
-            // Step 2: Get direct MP3 link
-            const dlUrl = `${SCDL.config.baseUrl}/soundcloud-get-dl?target=${encodeURIComponent(info.sound.progressive_url)}`;
-            const { data: dl } = await axios.get(dlUrl, { 
-                headers: SCDL.config.headers,
-                timeout: 15000 
-            });
-
-            return {
-                title: info.sound.title,
-                artist: info.metadata.username,
-                thumb: info.metadata.artwork_url || info.metadata.artwork_url_template?.replace('{width}x{height}', '300x300'),
-                duration: info.sound.duration ? Math.floor(info.sound.duration / 1000) : 0,
-                download_url: dl.url
-            };
-
-        } catch (err) {
-            throw new Error(err.message);
-        }
+  const res = await axios.post(
+    'https://accounts.spotify.com/api/token',
+    'grant_type=client_credentials',
+    {
+      headers: {
+        Authorization:
+          'Basic ' +
+          Buffer.from(`${SPOTIFY_CLIENT_ID}:${SPOTIFY_CLIENT_SECRET}`).toString('base64'),
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
     }
-};
+  );
 
-// Search SoundCloud (dari soundCloudSearchDL.js)
-async function searchSoundCloud(query) {
-    try {
-        const { data } = await axios.get(
-            `https://host.optikl.ink/soundcloud/search?query=${encodeURIComponent(query)}`,
-            { timeout: 15000 }
-        );
-        return data;
-    } catch (err) {
-        throw new Error("Gagal search: " + err.message);
-    }
+  _spotifyToken    = res.data.access_token;
+  _spotifyTokenExp = Date.now() + (res.data.expires_in - 60) * 1000; // minus 60s buffer
+  return _spotifyToken;
 }
 
-// Endpoint: Search + Download
+// ── Search Spotify ─────────────────────────────────────────
+async function searchSpotify(query) {
+  const token = await getSpotifyToken();
+  const res   = await axios.get('https://api.spotify.com/v1/search', {
+    params: { q: query, type: 'track', limit: 1 },
+    headers: { Authorization: `Bearer ${token}` },
+    timeout: 10000,
+  });
+
+  const items = res.data?.tracks?.items;
+  if (!items || items.length === 0) throw new Error('Lagu tidak ditemukan di Spotify');
+  return items[0];
+}
+
+// ── FAA Downloader ─────────────────────────────────────────
+//  API: GET https://faa.vex.my.id/api/spotify?query=<judul artis>
+//  Response: { status: true, download: { url: "..." }, info: { ... } }
+//  Ganti FAA_BASE jika domain berubah
+const FAA_BASE = 'https://faa.vex.my.id';
+
+async function faaDownload(query) {
+  const res = await axios.get(`${FAA_BASE}/api/spotify`, {
+    params: { query },
+    timeout: 25000,
+  });
+
+  const d = res.data;
+  if (!d?.status) throw new Error(d?.message || 'FAA API: status false');
+
+  // Cari download URL — support beberapa variasi response shape
+  const url =
+    d?.download?.url        ||
+    d?.result?.download     ||
+    d?.result?.downloadUrl  ||
+    d?.downloadUrl          ||
+    d?.download             ||
+    d?.url                  ||
+    d?.data?.url;
+
+  if (!url) throw new Error('FAA API: download URL tidak ditemukan dalam response');
+  return { url, info: d.info || {} };
+}
+
+// ════════════════════════════════════════════════════════════
+//  ENDPOINT UTAMA
+//  GET /api/soundcloud-play?q=<query>
+//  (nama endpoint tidak diubah agar frontend tidak perlu dimodif)
+// ════════════════════════════════════════════════════════════
 app.get('/api/soundcloud-play', async (req, res) => {
-    try {
-        const q = req.query.q || req.query.query;
-        
-        if (!q) {
-            return res.status(400).json({ 
-                status: false, 
-                message: 'Parameter q/query diperlukan' 
-            });
-        }
-
-        // 1. Search dulu
-        const searchResults = await searchSoundCloud(q);
-        
-        if (!searchResults || searchResults.length === 0) {
-            return res.status(404).json({ 
-                status: false, 
-                message: 'Lagu tidak ditemukan' 
-            });
-        }
-
-        // Ambil hasil pertama
-        const track = searchResults[0];
-        
-        // 2. Download lagu
-        const downloadInfo = await SCDL.download(track.url);
-
-        // Format response sama seperti FAA API (biar frontend tidak perlu banyak ubah)
-        res.json({
-            status: true,
-            info: {
-                title: downloadInfo.title,
-                artist: downloadInfo.artist,
-                album: '', // SoundCloud tidak ada album
-                duration: formatDuration(downloadInfo.duration),
-                thumbnail: downloadInfo.thumb,
-                soundcloud_url: track.url
-            },
-            download: {
-                url: downloadInfo.download_url, // Direct MP3 link
-                format: 'mp3',
-                size: 0 // Tidak diketahui dari API
-            },
-            source: 'soundcloud'
-        });
-
-    } catch (error) {
-        console.error('Error:', error.message);
-        res.status(500).json({ 
-            status: false, 
-            message: error.message 
-        });
+  try {
+    const q = (req.query.q || req.query.query || '').trim();
+    if (!q) {
+      return res.status(400).json({ status: false, message: 'Parameter q/query diperlukan' });
     }
+
+    // 1. Cari metadata dari Spotify
+    const track = await searchSpotify(q);
+
+    const title    = track.name;
+    const artist   = track.artists.map(a => a.name).join(', ');
+    const album    = track.album?.name || '';
+    const cover    = track.album?.images?.[0]?.url || '';
+    const spotUrl  = track.external_urls?.spotify || '';
+    const durationMs = track.duration_ms || 0;
+    const duration = formatDuration(Math.floor(durationMs / 1000));
+    const year     = track.album?.release_date?.slice(0, 4) || '–';
+
+    // 2. Download audio via FAA API (query: "judul artis")
+    const { url: audioUrl } = await faaDownload(`${title} ${artist}`);
+
+    // 3. Kembalikan response — shape sama seperti sebelumnya agar frontend tidak berubah
+    return res.json({
+      status: true,
+      info: {
+        title,
+        artist,
+        album,
+        duration,
+        thumbnail: cover,
+        soundcloud_url: spotUrl, // field name lama tetap dipertahankan
+        year,
+      },
+      download: {
+        url: audioUrl,
+        format: 'mp3',
+      },
+      source: 'spotify+faa',
+    });
+
+  } catch (err) {
+    console.error('[/api/soundcloud-play]', err.message);
+    return res.status(500).json({ status: false, message: err.message });
+  }
 });
 
-// Helper: Format detik ke mm:ss
-function formatDuration(seconds) {
-    if (!seconds) return '0:00';
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
+// ════════════════════════════════════════════════════════════
+//  ENDPOINT BARU: /api/spotify-play
+//  Alias yang lebih deskriptif (opsional, untuk bot Telegram)
+// ════════════════════════════════════════════════════════════
+app.get('/api/spotify-play', async (req, res) => {
+  req.url = '/api/soundcloud-play' + (req.url.includes('?') ? req.url.slice(req.url.indexOf('?') - 1) : '');
+  // Cukup forward ke handler di atas dengan cara sederhana:
+  // Re-implement inline agar tidak bergantung pada router trick
+  try {
+    const q = (req.query.q || req.query.query || '').trim();
+    if (!q) {
+      return res.status(400).json({ status: false, message: 'Parameter q/query diperlukan' });
+    }
+
+    const track    = await searchSpotify(q);
+    const title    = track.name;
+    const artist   = track.artists.map(a => a.name).join(', ');
+    const album    = track.album?.name || '';
+    const cover    = track.album?.images?.[0]?.url || '';
+    const spotUrl  = track.external_urls?.spotify || '';
+    const duration = formatDuration(Math.floor((track.duration_ms || 0) / 1000));
+    const year     = track.album?.release_date?.slice(0, 4) || '–';
+
+    const { url: audioUrl } = await faaDownload(`${title} ${artist}`);
+
+    return res.json({
+      status: true,
+      info: { title, artist, album, duration, thumbnail: cover, soundcloud_url: spotUrl, year },
+      download: { url: audioUrl, format: 'mp3' },
+      source: 'spotify+faa',
+    });
+  } catch (err) {
+    console.error('[/api/spotify-play]', err.message);
+    return res.status(500).json({ status: false, message: err.message });
+  }
+});
+
+// ════════════════════════════════════════════════════════════
+//  HEALTH CHECK
+// ════════════════════════════════════════════════════════════
+app.get('/api/health', (_req, res) => {
+  res.json({
+    status: 'ok',
+    service: 'pagaska-music-backend',
+    source: 'spotify+faa',
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// ── Helper ────────────────────────────────────────────────
+function formatDuration(totalSeconds) {
+  if (!totalSeconds || isNaN(totalSeconds)) return '0:00';
+  const m = Math.floor(totalSeconds / 60);
+  const s = totalSeconds % 60;
+  return `${m}:${String(s).padStart(2, '0')}`;
 }
 
-// Health check
-app.get('/api/health', (req, res) => {
-    res.json({ 
-        status: 'ok', 
-        service: 'soundcloud-downloader',
-        timestamp: new Date().toISOString() 
-    });
-});
-
-// Export untuk Vercel
+// ── Export untuk Vercel ───────────────────────────────────
 module.exports = app;
 
-// Local development
+// ── Local dev ─────────────────────────────────────────────
 if (require.main === module) {
-    app.listen(PORT, () => {
-        console.log(`SoundCloud Proxy running on port ${PORT}`);
-    });
+  app.listen(PORT, () => {
+    console.log(`✅ Pagaska Music Backend running on port ${PORT}`);
+    console.log(`   Source: Spotify metadata + FAA downloader`);
+  });
 }
