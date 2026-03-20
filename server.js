@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const SPOTIFY_CLIENT_ID     = "f235a7370f4442f7a062738fdd310dfa";
 const SPOTIFY_CLIENT_SECRET = "0cf4d6c4e1344f45bdd8b3d4a5f3cad5";
 
-// ── Token cache (tidak hit /api/token setiap request) ─────────
+// ── Token cache ───────────────────────────────────────────────
 let _spotifyToken    = null;
 let _spotifyTokenExp = 0;
 
@@ -54,10 +54,9 @@ async function searchSpotify(query) {
 }
 
 // ── FAA Downloader ────────────────────────────────────────────
-const FAA_BASE = 'https://faa.vex.my.id';
-
+//  Endpoint: GET https://api-faa.my.id/faa/spotify-play?query=<judul artis>
 async function faaDownload(query) {
-  const res = await axios.get(`${FAA_BASE}/api/spotify`, {
+  const res = await axios.get('https://api-faa.my.id/faa/spotify-play', {
     params:  { query },
     timeout: 25000,
   });
@@ -70,12 +69,13 @@ async function faaDownload(query) {
     d?.download?.url       ||
     d?.result?.download    ||
     d?.result?.downloadUrl ||
+    d?.result?.url         ||
     d?.downloadUrl         ||
     d?.download            ||
     d?.url                 ||
     d?.data?.url;
 
-  if (!url) throw new Error('FAA API: download URL tidak ada dalam response');
+  if (!url) throw new Error('FAA API: download URL tidak ditemukan dalam response');
   return url;
 }
 
@@ -102,7 +102,7 @@ app.get('/api/soundcloud-play', async (req, res) => {
     const duration = formatDuration(Math.floor((track.duration_ms || 0) / 1000));
     const year     = track.album?.release_date?.slice(0, 4) || '–';
 
-    // 2. Download audio via FAA (query: "judul artis")
+    // 2. Download audio via FAA
     const audioUrl = await faaDownload(`${title} ${artist}`);
 
     // 3. Response — shape sama persis seperti sebelumnya
@@ -114,7 +114,7 @@ app.get('/api/soundcloud-play', async (req, res) => {
         album,
         duration,
         thumbnail:      cover,
-        soundcloud_url: spotUrl,  // field dipertahankan, isinya URL Spotify
+        soundcloud_url: spotUrl,
         year,
       },
       download: {
@@ -135,7 +135,7 @@ app.get('/api/health', (_req, res) => {
   res.json({
     status:    'ok',
     service:   'pagaska-music-backend',
-    source:    'spotify+faa',
+    source:    'spotify + faa (api-faa.my.id)',
     timestamp: new Date().toISOString(),
   });
 });
@@ -154,6 +154,6 @@ module.exports = app;
 if (require.main === module) {
   app.listen(PORT, () => {
     console.log(`✅ Pagaska Music Backend: port ${PORT}`);
-    console.log(`   Source: Spotify metadata + FAA downloader`);
+    console.log(`   Source: Spotify metadata + FAA (api-faa.my.id)`);
   });
 }
