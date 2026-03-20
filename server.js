@@ -10,12 +10,11 @@ const PORT = process.env.PORT || 3000;
 
 // ════════════════════════════════════════════════════════════
 //  SPOTIFY CREDENTIALS
-//  Sama persis seperti yang dipakai bot Telegram pagaska.js
 // ════════════════════════════════════════════════════════════
 const SPOTIFY_CLIENT_ID     = "f235a7370f4442f7a062738fdd310dfa";
 const SPOTIFY_CLIENT_SECRET = "0cf4d6c4e1344f45bdd8b3d4a5f3cad5";
 
-// ── Token cache (supaya tidak hit /api/token setiap request) ──
+// ── Token cache (tidak hit /api/token setiap request) ─────────
 let _spotifyToken    = null;
 let _spotifyTokenExp = 0;
 
@@ -36,15 +35,15 @@ async function getSpotifyToken() {
   );
 
   _spotifyToken    = res.data.access_token;
-  _spotifyTokenExp = Date.now() + (res.data.expires_in - 60) * 1000; // minus 60s buffer
+  _spotifyTokenExp = Date.now() + (res.data.expires_in - 60) * 1000;
   return _spotifyToken;
 }
 
-// ── Search Spotify ─────────────────────────────────────────
+// ── Search metadata dari Spotify ──────────────────────────────
 async function searchSpotify(query) {
   const token = await getSpotifyToken();
   const res   = await axios.get('https://api.spotify.com/v1/search', {
-    params: { q: query, type: 'track', limit: 1 },
+    params:  { q: query, type: 'track', limit: 1 },
     headers: { Authorization: `Bearer ${token}` },
     timeout: 10000,
   });
@@ -54,48 +53,45 @@ async function searchSpotify(query) {
   return items[0];
 }
 
-// ── FAA Downloader ─────────────────────────────────────────
-//  API: GET https://faa.vex.my.id/api/spotify?query=<judul artis>
-//  Response: { status: true, download: { url: "..." }, info: { ... } }
-//  Ganti FAA_BASE jika domain berubah
+// ── FAA Downloader ────────────────────────────────────────────
 const FAA_BASE = 'https://faa.vex.my.id';
 
 async function faaDownload(query) {
   const res = await axios.get(`${FAA_BASE}/api/spotify`, {
-    params: { query },
+    params:  { query },
     timeout: 25000,
   });
 
   const d = res.data;
   if (!d?.status) throw new Error(d?.message || 'FAA API: status false');
 
-  // Cari download URL — support beberapa variasi response shape
+  // Support berbagai shape response
   const url =
-    d?.download?.url        ||
-    d?.result?.download     ||
-    d?.result?.downloadUrl  ||
-    d?.downloadUrl          ||
-    d?.download             ||
-    d?.url                  ||
+    d?.download?.url       ||
+    d?.result?.download    ||
+    d?.result?.downloadUrl ||
+    d?.downloadUrl         ||
+    d?.download            ||
+    d?.url                 ||
     d?.data?.url;
 
-  if (!url) throw new Error('FAA API: download URL tidak ditemukan dalam response');
-  return { url, info: d.info || {} };
+  if (!url) throw new Error('FAA API: download URL tidak ada dalam response');
+  return url;
 }
 
 // ════════════════════════════════════════════════════════════
 //  ENDPOINT UTAMA
 //  GET /api/soundcloud-play?q=<query>
-//  (nama endpoint tidak diubah agar frontend tidak perlu dimodif)
+//  Nama endpoint dipertahankan agar index.html tidak perlu diubah
 // ════════════════════════════════════════════════════════════
 app.get('/api/soundcloud-play', async (req, res) => {
   try {
     const q = (req.query.q || req.query.query || '').trim();
     if (!q) {
-      return res.status(400).json({ status: false, message: 'Parameter q/query diperlukan' });
+      return res.status(400).json({ status: false, message: 'Parameter q diperlukan' });
     }
 
-    // 1. Cari metadata dari Spotify
+    // 1. Ambil metadata dari Spotify
     const track = await searchSpotify(q);
 
     const title    = track.name;
@@ -103,14 +99,13 @@ app.get('/api/soundcloud-play', async (req, res) => {
     const album    = track.album?.name || '';
     const cover    = track.album?.images?.[0]?.url || '';
     const spotUrl  = track.external_urls?.spotify || '';
-    const durationMs = track.duration_ms || 0;
-    const duration = formatDuration(Math.floor(durationMs / 1000));
+    const duration = formatDuration(Math.floor((track.duration_ms || 0) / 1000));
     const year     = track.album?.release_date?.slice(0, 4) || '–';
 
-    // 2. Download audio via FAA API (query: "judul artis")
-    const { url: audioUrl } = await faaDownload(`${title} ${artist}`);
+    // 2. Download audio via FAA (query: "judul artis")
+    const audioUrl = await faaDownload(`${title} ${artist}`);
 
-    // 3. Kembalikan response — shape sama seperti sebelumnya agar frontend tidak berubah
+    // 3. Response — shape sama persis seperti sebelumnya
     return res.json({
       status: true,
       info: {
@@ -118,12 +113,12 @@ app.get('/api/soundcloud-play', async (req, res) => {
         artist,
         album,
         duration,
-        thumbnail: cover,
-        soundcloud_url: spotUrl, // field name lama tetap dipertahankan
+        thumbnail:      cover,
+        soundcloud_url: spotUrl,  // field dipertahankan, isinya URL Spotify
         year,
       },
       download: {
-        url: audioUrl,
+        url:    audioUrl,
         format: 'mp3',
       },
       source: 'spotify+faa',
@@ -135,56 +130,17 @@ app.get('/api/soundcloud-play', async (req, res) => {
   }
 });
 
-// ════════════════════════════════════════════════════════════
-//  ENDPOINT BARU: /api/spotify-play
-//  Alias yang lebih deskriptif (opsional, untuk bot Telegram)
-// ════════════════════════════════════════════════════════════
-app.get('/api/spotify-play', async (req, res) => {
-  req.url = '/api/soundcloud-play' + (req.url.includes('?') ? req.url.slice(req.url.indexOf('?') - 1) : '');
-  // Cukup forward ke handler di atas dengan cara sederhana:
-  // Re-implement inline agar tidak bergantung pada router trick
-  try {
-    const q = (req.query.q || req.query.query || '').trim();
-    if (!q) {
-      return res.status(400).json({ status: false, message: 'Parameter q/query diperlukan' });
-    }
-
-    const track    = await searchSpotify(q);
-    const title    = track.name;
-    const artist   = track.artists.map(a => a.name).join(', ');
-    const album    = track.album?.name || '';
-    const cover    = track.album?.images?.[0]?.url || '';
-    const spotUrl  = track.external_urls?.spotify || '';
-    const duration = formatDuration(Math.floor((track.duration_ms || 0) / 1000));
-    const year     = track.album?.release_date?.slice(0, 4) || '–';
-
-    const { url: audioUrl } = await faaDownload(`${title} ${artist}`);
-
-    return res.json({
-      status: true,
-      info: { title, artist, album, duration, thumbnail: cover, soundcloud_url: spotUrl, year },
-      download: { url: audioUrl, format: 'mp3' },
-      source: 'spotify+faa',
-    });
-  } catch (err) {
-    console.error('[/api/spotify-play]', err.message);
-    return res.status(500).json({ status: false, message: err.message });
-  }
-});
-
-// ════════════════════════════════════════════════════════════
-//  HEALTH CHECK
-// ════════════════════════════════════════════════════════════
+// ── Health check ──────────────────────────────────────────────
 app.get('/api/health', (_req, res) => {
   res.json({
-    status: 'ok',
-    service: 'pagaska-music-backend',
-    source: 'spotify+faa',
+    status:    'ok',
+    service:   'pagaska-music-backend',
+    source:    'spotify+faa',
     timestamp: new Date().toISOString(),
   });
 });
 
-// ── Helper ────────────────────────────────────────────────
+// ── Helper: format detik → mm:ss ─────────────────────────────
 function formatDuration(totalSeconds) {
   if (!totalSeconds || isNaN(totalSeconds)) return '0:00';
   const m = Math.floor(totalSeconds / 60);
@@ -192,13 +148,12 @@ function formatDuration(totalSeconds) {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
-// ── Export untuk Vercel ───────────────────────────────────
+// ── Export untuk Vercel ───────────────────────────────────────
 module.exports = app;
 
-// ── Local dev ─────────────────────────────────────────────
 if (require.main === module) {
   app.listen(PORT, () => {
-    console.log(`✅ Pagaska Music Backend running on port ${PORT}`);
+    console.log(`✅ Pagaska Music Backend: port ${PORT}`);
     console.log(`   Source: Spotify metadata + FAA downloader`);
   });
 }
