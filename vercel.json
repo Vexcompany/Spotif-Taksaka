@@ -11,5 +11,21 @@
       "src": "/(.*)",
       "dest": "server.js"
     }
+  ],
+  {
+  "rewrites": [
+    { "source": "/", "destination": "/index.html" },
+    { "source": "/beranda", "destination": "/index.html" },
+    { "source": "/radio", "destination": "/index.html" },
+    { "source": "/party", "destination": "/index.html" },
+    { "source": "/chart", "destination": "/index.html" },
+    { "source": "/karaoke", "destination": "/index.html" },
+    { "source": "/chat", "destination": "/index.html" },
+    { "source": "/wrapped", "destination": "/index.html" },
+    { "source": "/capsule", "destination": "/index.html" },
+    { "source": "/explore", "destination": "/index.html" },
+    { "source": "/profil", "destination": "/index.html" },
+    { "source": "/admin", "destination": "/index.html" }
   ]
+}
 }
